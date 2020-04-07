@@ -1,9 +1,13 @@
 #include <DataHandlerClass.h>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/highgui/highgui.hpp>
 
 DataUARTHandler::DataUARTHandler(ros::NodeHandle* nh) : currentBufp(&pingPongBuffers[0]) , nextBufp(&pingPongBuffers[1]) {
     DataUARTHandler_pub = nh->advertise<sensor_msgs::PointCloud2>("/ti_mmwave/radar_scan_pcl", 100);
     radar_scan_pub = nh->advertise<ti_mmwave_rospkg::RadarScan>("/ti_mmwave/radar_scan", 100);
-    marker_pub = nh->advertise<visualization_msgs::Marker>("/ti_mmwave/radar_scan_markers", 100);
+    radar_raw_pub = nh->advertise<sensor_msgs::Image>("/ti_mmwave/range_azimuth", 100);
+	range_doppeler_pub = nh->advertise<sensor_msgs::Image>("/ti_mmwave/range_doppler", 100);
+	marker_pub = nh->advertise<visualization_msgs::Marker>("/ti_mmwave/radar_scan_markers", 100);
     maxAllowedElevationAngleDeg = 90; // Use max angle if none specified
     maxAllowedAzimuthAngleDeg = 90; // Use max angle if none specified
 
@@ -23,8 +27,8 @@ DataUARTHandler::DataUARTHandler(ros::NodeHandle* nh) : currentBufp(&pingPongBuf
     nh->getParam("/ti_mmwave/max_doppler_vel", max_vel);
     nh->getParam("/ti_mmwave/doppler_vel_resolution", vvel);
 
-    ROS_INFO("\n\n==============================\nList of parameters\n==============================\nNumber of range samples: %d\nNumber of chirps: %d\nf_s: %.3f MHz\nf_c: %.3f GHz\nBandwidth: %.3f MHz\nPRI: %.3f us\nFrame time: %.3f ms\nMax range: %.3f m\nRange resolution: %.3f m\nMax Doppler: +-%.3f m/s\nDoppler resolution: %.3f m/s\n==============================\n", \
-        nr, nd, fs/1e6, fc/1e9, BW/1e6, PRI*1e6, tfr*1e3, max_range, vrange, max_vel/2, vvel);
+    ROS_INFO("\n\n==============================\nList of parameters\n==============================\nNumber of range samples: %d\nNumber of chirps: %d\nNumber of TX: %d\nf_s: %.3f MHz\nf_c: %.3f GHz\nBandwidth: %.3f MHz\nPRI: %.3f us\nFrame time: %.3f ms\nMax range: %.3f m\nRange resolution: %.3f m\nMax Doppler: +-%.3f m/s\nDoppler resolution: %.3f m/s\n==============================\n", \
+        nr, nd*2, ntx, fs/1e6, fc/1e9, BW/1e6, PRI*1e6, tfr*1e3, max_range, vrange, max_vel/2, vvel);
 }
 
 void DataUARTHandler::setFrameID(char* myFrameID)
@@ -88,8 +92,7 @@ void *DataUARTHandler::readIncomingData(void)
         ROS_INFO("DataUARTHandler Read Thread: Port is open");
     else
         ROS_ERROR("DataUARTHandler Read Thread: Port could not be opened");
-    
-    /*Quick magicWord check to synchronize program with data Stream*/
+	/*Quick magicWord check to synchronize program with data Stream*/
     while(!isMagicWord(last8Bytes))
     {
 
@@ -100,14 +103,12 @@ void *DataUARTHandler::readIncomingData(void)
         last8Bytes[4] = last8Bytes[5];
         last8Bytes[5] = last8Bytes[6];
         last8Bytes[6] = last8Bytes[7];
-        mySerialObject.read(&last8Bytes[7], 1);
-        
-    }
+		mySerialObject.read(&last8Bytes[7], 1);
+	}
     
     /*Lock nextBufp before entering main loop*/
     pthread_mutex_lock(&nextBufp_mutex);
-    
-    while(ros::ok())
+	while(ros::ok())
     {
         /*Start reading UART data and writing to buffer while also checking for magicWord*/
         last8Bytes[0] = last8Bytes[1];
@@ -118,8 +119,7 @@ void *DataUARTHandler::readIncomingData(void)
         last8Bytes[5] = last8Bytes[6];
         last8Bytes[6] = last8Bytes[7];
         mySerialObject.read(&last8Bytes[7], 1);
-        
-        nextBufp->push_back( last8Bytes[7] );  //push byte onto buffer
+		nextBufp->push_back( last8Bytes[7] );  //push byte onto buffer
         
         //ROS_INFO("DataUARTHandler Read Thread: last8bytes = %02x%02x %02x%02x %02x%02x %02x%02x",  last8Bytes[7], last8Bytes[6], last8Bytes[5], last8Bytes[4], last8Bytes[3], last8Bytes[2], last8Bytes[1], last8Bytes[0]);
         
@@ -127,8 +127,7 @@ void *DataUARTHandler::readIncomingData(void)
         if( isMagicWord(last8Bytes) )
         {
             //ROS_INFO("Found magic word");
-        
-            /*Lock countSync Mutex while unlocking nextBufp so that the swap thread can use it*/
+			/*Lock countSync Mutex while unlocking nextBufp so that the swap thread can use it*/
             pthread_mutex_lock(&countSync_mutex);
             pthread_mutex_unlock(&nextBufp_mutex);
             
@@ -153,7 +152,7 @@ void *DataUARTHandler::readIncomingData(void)
             
             /*Unlock countSync so that Swap Thread can use it*/
             pthread_mutex_unlock(&countSync_mutex);
-            pthread_mutex_lock(&nextBufp_mutex);
+			pthread_mutex_lock(&nextBufp_mutex);
             
             nextBufp->clear();
             memset(last8Bytes, 0, sizeof(last8Bytes));
@@ -230,7 +229,8 @@ void *DataUARTHandler::syncedBufferSwap(void)
 
 void *DataUARTHandler::sortIncomingData( void )
 {
-    MmwDemo_Output_TLV_Types tlvType = MMWDEMO_OUTPUT_MSG_NULL;
+	ROS_INFO("setIncomingData\n");
+	MmwDemo_Output_TLV_Types tlvType = MMWDEMO_OUTPUT_MSG_NULL;
     uint32_t tlvLen = 0;
     uint32_t headerSize;
     unsigned int currentDatap = 0;
@@ -239,18 +239,20 @@ void *DataUARTHandler::sortIncomingData( void )
     int j = 0;
     float maxElevationAngleRatioSquared;
     float maxAzimuthAngleRatio;
+	int range_fft_num = 0;
     
     boost::shared_ptr<pcl::PointCloud<pcl::PointXYZI>> RScan(new pcl::PointCloud<pcl::PointXYZI>);
     ti_mmwave_rospkg::RadarScan radarscan;
+	ti_mmwave_rospkg::RadarRaw radarraw;
 
-    //wait for first packet to arrive
+	//wait for first packet to arrive
     pthread_mutex_lock(&countSync_mutex);
     pthread_cond_wait(&sort_go_cv, &countSync_mutex);
     pthread_mutex_unlock(&countSync_mutex);
-    
-    pthread_mutex_lock(&currentBufp_mutex);
-    
-    while(ros::ok())
+
+	pthread_mutex_lock(&currentBufp_mutex);
+
+	while(ros::ok())
     {
         
         switch(sorterState)
@@ -310,8 +312,8 @@ void *DataUARTHandler::sortIncomingData( void )
             //get numTLVs (4 bytes)
             memcpy( &mmwData.header.numTLVs, &currentBufp->at(currentDatap), sizeof(mmwData.header.numTLVs));
             currentDatap += ( sizeof(mmwData.header.numTLVs) );
-            
-            //get subFrameNumber (4 bytes) (not used for XWR1443)
+			
+			//get subFrameNumber (4 bytes) (not used for XWR1443)
             if((mmwData.header.platform & 0xFFFF) != 0x1443) {
                memcpy( &mmwData.header.subFrameNumber, &currentBufp->at(currentDatap), sizeof(mmwData.header.subFrameNumber));
                currentDatap += ( sizeof(mmwData.header.subFrameNumber) );
@@ -468,11 +470,10 @@ void *DataUARTHandler::sortIncomingData( void )
                     // radarscan.doppler_bin = tmp;
                     // radarscan.bearing = temp[6];
                     // radarscan.intensity = temp[5];
-                    
 
                     // For SDK 3.x, intensity is replaced by snr in sideInfo and is parsed in the READ_SIDE_INFO code
                 }
-
+				/*
                 if (((maxElevationAngleRatioSquared == -1) ||
                              (((RScan->points[i].z * RScan->points[i].z) / (RScan->points[i].x * RScan->points[i].x +
                                                                             RScan->points[i].y * RScan->points[i].y)
@@ -483,11 +484,12 @@ void *DataUARTHandler::sortIncomingData( void )
                            )
                 {
                     radar_scan_pub.publish(radarscan);
-                }
+                }*/
                 i++;
             }
+			//ROS_INFO("DataUARTHandler Sort Thread : Parsing obj Profile i=%d and tlvLen = %u", i, tlvLen);
 
-            sorterState = CHECK_TLV_TYPE;
+			sorterState = CHECK_TLV_TYPE;
             
             break;
 
@@ -527,9 +529,9 @@ void *DataUARTHandler::sortIncomingData( void )
 
         case READ_LOG_MAG_RANGE:
             {
-
-
-              sorterState = CHECK_TLV_TYPE;
+				range_fft_num = tlvLen / sizeof(uint16_t);
+				currentDatap += tlvLen;
+				sorterState = CHECK_TLV_TYPE;
             }
             
             break;
@@ -555,15 +557,61 @@ void *DataUARTHandler::sortIncomingData( void )
             {
         
               i = 0;
-            
-              while (i++ < tlvLen - 1)
-              {
-                     //ROS_INFO("DataUARTHandler Sort Thread : Parsing Azimuth Profile i=%d and tlvLen = %u", i, tlvLen);
-              }
-            
-              currentDatap += tlvLen;
-            
-              sorterState = CHECK_TLV_TYPE;
+			  radarraw.header.frame_id = frameID;
+			  radarraw.header.stamp = ros::Time::now();
+			  int num_virtual_rx = 4*ntx;
+			  cv::Mat range_virtualAnntena = cv::Mat::zeros(range_fft_num, num_virtual_rx, CV_32FC2);
+			  int fft_rows = cvGetOptimalDFTSize(range_virtualAnntena.rows);
+			  int fft_cols = cvGetOptimalDFTSize(range_virtualAnntena.cols);
+
+			  cv::Mat range_azimuth_tensor = cv::Mat::zeros(fft_rows, fft_cols, CV_16UC1);
+			  cv::Mat range_azimuth_heatmap(cv::Size(fft_cols, fft_rows), CV_8UC3, cv::Scalar(0, 255, 255));
+			 // ROS_INFO("%d, %d\n", range_azimuth_heatmap.rows, range_azimuth_heatmap.cols);
+			  //ROS_INFO("DataUARTHandler Sort Thread : Parsing Azimuth Profile i=%d and tlvLen = %u", sizeof(mmwData.azimuthStatHmap), tlvLen);
+
+			  for (i = 0; i < range_fft_num; i++)
+			  {
+				  for (j = 0; j < num_virtual_rx; j++)
+				  {
+					  memcpy(&mmwData.azimuthStatHmap, &currentBufp->at(currentDatap), sizeof(mmwData.azimuthStatHmap));
+					  cv::Vec2b &elem = range_virtualAnntena.at<cv::Vec2b>(j, i);
+					  if (mmwData.azimuthStatHmap.real > 32767){
+						  mmwData.azimuthStatHmap.real -= 65536;
+					  }
+					  if (mmwData.azimuthStatHmap.imag > 32767)
+					  {
+						  mmwData.azimuthStatHmap.imag -= 65536;
+					  }
+					  elem[0] = float(mmwData.azimuthStatHmap.real);
+					  elem[1] = float(mmwData.azimuthStatHmap.imag);
+					  currentDatap += (sizeof(mmwData.azimuthStatHmap));
+				  }
+			  }
+			
+			  dft(range_virtualAnntena, range_virtualAnntena); // range azimuth heatmap
+
+			  uint16_t elem_min = 0, elem_max = 32767, elems;
+			  for(i=0;i<range_fft_num; i++){
+				  for(int j=0; j<num_virtual_rx; j++){
+					  cv::Vec2b comp = range_virtualAnntena.at<cv::Vec2b>(j, i);
+					  elems = cv::norm(comp);
+					  range_azimuth_tensor.at<uint16_t>(j, i) = elems;
+				  }
+			  }
+			  for(i=0;i<range_fft_num; i++){
+				  for (int j = 0; j < num_virtual_rx; j++)
+				  {
+					  range_azimuth_heatmap.at<cv::Vec3b>(j, i)[0] = uint8_t(120 * (range_azimuth_tensor.at<uint16_t>(j, i) - elem_min) / (elem_max - elem_min));
+				  }
+			  }
+			  //currentDatap += tlvLen;
+			  std_msgs::Header header;
+			  header.frame_id = frameID;
+			  header.stamp = ros::Time::now();
+			  cvtColor(range_azimuth_heatmap, range_azimuth_heatmap, CV_HSV2BGR);
+			  sensor_msgs::ImagePtr msg = cv_bridge::CvImage(header, "bgr8", range_azimuth_heatmap).toImageMsg();
+			  radar_raw_pub.publish(msg);
+			  sorterState = CHECK_TLV_TYPE;
             }
             
             break;
@@ -572,16 +620,28 @@ void *DataUARTHandler::sortIncomingData( void )
             {
         
               i = 0;
-            
-              while (i++ < tlvLen - 1)
-              {
-                     //ROS_INFO("DataUARTHandler Sort Thread : Parsing Doppler Profile i=%d and tlvLen = %u", i, tlvLen);
-              }
-            
-              currentDatap += tlvLen;
-            
-              sorterState = CHECK_TLV_TYPE;
-            }
+			  uint16_t elem_min = 0, elem_max = 6000;
+			  uint16_t elem;
+			  cv::Mat range_doppler_heatmap(cv::Size(range_fft_num, nd), CV_8UC3, cv::Scalar(0, 255, 255));
+			  cv::Mat range_doppler_tensor(cv::Size(range_fft_num, nd), CV_16UC1);
+			  for(i=0; i< range_fft_num; i++){
+				  for (int j=0; j<nd; j++){
+					memcpy(&elem, &currentBufp->at(currentDatap), sizeof(uint16_t));
+					currentDatap += sizeof(uint16_t);
+					range_doppler_tensor.at<uint16_t>(j, i) = elem;
+					range_doppler_heatmap.at<cv::Vec3b>(j, i)[0] = uint8_t(120 * (elem - elem_min) / (elem_max - elem_min));
+				  }
+			  }
+
+			  std_msgs::Header header;
+			  header.frame_id = frameID;
+			  header.stamp = ros::Time::now();
+			  cvtColor(range_doppler_heatmap, range_doppler_heatmap, CV_HSV2BGR);
+			  sensor_msgs::ImagePtr msg = cv_bridge::CvImage(header, "bgr8", range_doppler_heatmap).toImageMsg();
+
+			  range_doppeler_pub.publish(msg);
+			  sorterState = CHECK_TLV_TYPE;
+			}
             
             break;
             
@@ -658,8 +718,8 @@ void *DataUARTHandler::sortIncomingData( void )
                 //get tlvLen (32 bits) & remove from queue
                 memcpy( &tlvLen, &currentBufp->at(currentDatap), sizeof(tlvLen));
                 currentDatap += ( sizeof(tlvLen) );
-                
-                //ROS_INFO("DataUARTHandler Sort Thread : sizeof(tlvLen) = %d", sizeof(tlvLen));
+
+				//ROS_INFO("DataUARTHandler Sort Thread : sizeof(tlvLen) = %d", sizeof(tlvLen));
                 
                 //ROS_INFO("DataUARTHandler Sort Thread : tlvType = %d, tlvLen = %d", (int) tlvType, tlvLen);
             
@@ -741,7 +801,7 @@ void *DataUARTHandler::sortIncomingData( void )
                 
             
         default: break;
-        }
+		}
     }
     
     

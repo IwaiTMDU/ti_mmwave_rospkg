@@ -125,7 +125,12 @@ struct MmwDemo_DetectedObj
         int16_t  y;             /*!< @brief y - coordinate in meters. Q format depends on the range resolution */
         int16_t  z;             /*!< @brief z - coordinate in meters. Q format depends on the range resolution */
     };
-    
+
+struct cmplx16ImRe_t{
+	int16_t imag;
+	int16_t real;
+};
+
 // Detected object structures for mmWave SDK 3.x (DPIF_PointCloudCartesian_t and DPIF_PointCloudSideInfo_t)
 
 /**
@@ -164,7 +169,6 @@ int16_t snr;
 int16_t noise;
 }DPIF_PointCloudSideInfo;
 
-
 struct mmwDataPacket{
 MmwDemo_output_message_header_t header;
 uint16_t numObjOut;
@@ -173,6 +177,8 @@ MmwDemo_DetectedObj objOut; // only used for SDK 1.x and 2.x
 
 DPIF_PointCloudCartesian_t newObjOut; // used for SDK 3.x
 DPIF_PointCloudSideInfo_t sideInfo; // used for SDK 3.x
+uint16_t range_fft;
+cmplx16ImRe_t azimuthStatHmap; // azimuth static heaetmap used for SDK 3.x
 };
 
 const uint8_t magicWord[8] = {2, 1, 4, 3, 6, 5, 8, 7};
