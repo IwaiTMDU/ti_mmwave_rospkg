@@ -1,6 +1,9 @@
 #include <DataHandlerClass.h>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/highgui/highgui.hpp>
+#include <Eigen/Core>
+#include <unsupported/Eigen/FFT>
+#include <complex>
 
 DataUARTHandler::DataUARTHandler(ros::NodeHandle* nh) : currentBufp(&pingPongBuffers[0]) , nextBufp(&pingPongBuffers[1]) {
     DataUARTHandler_pub = nh->advertise<sensor_msgs::PointCloud2>("/ti_mmwave/radar_scan_pcl", 100);
@@ -564,44 +567,61 @@ void *DataUARTHandler::sortIncomingData( void )
 			  int fft_rows = cvGetOptimalDFTSize(range_virtualAnntena.rows);
 			  int fft_cols = cvGetOptimalDFTSize(range_virtualAnntena.cols);
 
-			  cv::Mat range_azimuth_tensor = cv::Mat::zeros(fft_rows, fft_cols, CV_16UC1);
+			  unsigned short range_azimuth_tensor[fft_rows*fft_cols];
 			  cv::Mat range_azimuth_heatmap(cv::Size(fft_cols, fft_rows), CV_8UC3, cv::Scalar(0, 255, 255));
-			 // ROS_INFO("%d, %d\n", range_azimuth_heatmap.rows, range_azimuth_heatmap.cols);
-			  //ROS_INFO("DataUARTHandler Sort Thread : Parsing Azimuth Profile i=%d and tlvLen = %u", sizeof(mmwData.azimuthStatHmap), tlvLen);
 
+			  cmplx16ImRe_t comp;
+			  std::vector<std::complex<float>> virtual_rx_data(num_virtual_rx);
+			  std::vector<std::complex<float>> fft_data(num_virtual_rx);
+			  Eigen::FFT<float> fft;
 			  for (i = 0; i < range_fft_num; i++)
 			  {
-				  for (j = 0; j < num_virtual_rx; j++)
+				  for (int j = 0; j < num_virtual_rx; j++)
 				  {
-					  memcpy(&mmwData.azimuthStatHmap, &currentBufp->at(currentDatap), sizeof(mmwData.azimuthStatHmap));
-					  cv::Vec2b &elem = range_virtualAnntena.at<cv::Vec2b>(j, i);
-					  if (mmwData.azimuthStatHmap.real > 32767){
-						  mmwData.azimuthStatHmap.real -= 65536;
-					  }
-					  if (mmwData.azimuthStatHmap.imag > 32767)
-					  {
-						  mmwData.azimuthStatHmap.imag -= 65536;
-					  }
-					  elem[0] = float(mmwData.azimuthStatHmap.real);
-					  elem[1] = float(mmwData.azimuthStatHmap.imag);
-					  currentDatap += (sizeof(mmwData.azimuthStatHmap));
-				  }
-			  }
-			
-			  dft(range_virtualAnntena, range_virtualAnntena); // range azimuth heatmap
+					  memcpy(&comp, &currentBufp->at(currentDatap), sizeof(comp));
+					  currentDatap += (sizeof(comp));
 
-			  uint16_t elem_min = 0, elem_max = 32767, elems;
+					  if (comp.real > 32767){
+						  comp.real -= 65536;
+					  }
+					  if (comp.imag > 32767)
+					  {
+						  comp.imag -= 65536;
+					  }
+					  virtual_rx_data[j].real(float(comp.real));
+					  virtual_rx_data[j].imag(float(comp.imag));
+					  //currentDatap += (sizeof(mmwData.azimuthStatHmap));
+				  }
+
+				  fft.fwd(fft_data,virtual_rx_data);
+				  for(int j=0; j < num_virtual_rx; j++){
+					  range_azimuth_tensor[i * num_virtual_rx + j] = std::norm(virtual_rx_data[j]);
+				  }
+
+			  }
+
+			  float elem_min = 0, elem_max = 500, elems;
 			  for(i=0;i<range_fft_num; i++){
 				  for(int j=0; j<num_virtual_rx; j++){
-					  cv::Vec2b comp = range_virtualAnntena.at<cv::Vec2b>(j, i);
-					  elems = cv::norm(comp);
-					  range_azimuth_tensor.at<uint16_t>(j, i) = elems;
+					  int index = i * num_virtual_rx + j;
+					  elems = range_azimuth_tensor[i * num_virtual_rx + j];
+					  if((i==0) && (j==0)){
+						  elem_min = elems;
+						  elem_max = elems;
+					  }else{
+						  if(elem_min > elems){
+							  elem_min = elems;
+						  }
+						  if(elem_max < elems){
+							  elem_max = elems;
+						  }
+					  }
 				  }
 			  }
 			  for(i=0;i<range_fft_num; i++){
 				  for (int j = 0; j < num_virtual_rx; j++)
 				  {
-					  range_azimuth_heatmap.at<cv::Vec3b>(j, i)[0] = uint8_t(120 * (range_azimuth_tensor.at<uint16_t>(j, i) - elem_min) / (elem_max - elem_min));
+					  range_azimuth_heatmap.data[3 * (i * num_virtual_rx + j)] = 120-uint8_t(120 * (range_azimuth_tensor[i * num_virtual_rx + j] - elem_min) / (elem_max - elem_min));
 				  }
 			  }
 			  //currentDatap += tlvLen;
@@ -609,7 +629,7 @@ void *DataUARTHandler::sortIncomingData( void )
 			  header.frame_id = frameID;
 			  header.stamp = ros::Time::now();
 			  cvtColor(range_azimuth_heatmap, range_azimuth_heatmap, CV_HSV2BGR);
-			  sensor_msgs::ImagePtr msg = cv_bridge::CvImage(header, "bgr8", range_azimuth_heatmap).toImageMsg();
+			  sensor_msgs::ImagePtr msg = cv_bridge::CvImage(header, "bgr8", range_azimuth_heatmap.t()).toImageMsg();
 			  radar_raw_pub.publish(msg);
 			  sorterState = CHECK_TLV_TYPE;
             }
@@ -622,14 +642,38 @@ void *DataUARTHandler::sortIncomingData( void )
               i = 0;
 			  uint16_t elem_min = 0, elem_max = 6000;
 			  uint16_t elem;
-			  cv::Mat range_doppler_heatmap(cv::Size(range_fft_num, nd), CV_8UC3, cv::Scalar(0, 255, 255));
-			  cv::Mat range_doppler_tensor(cv::Size(range_fft_num, nd), CV_16UC1);
+			  cv::Mat range_doppler_heatmap(cv::Size(range_fft_num,nd), CV_8UC3, cv::Scalar(0, 255, 255));
+			  unsigned short range_doppler_data[range_fft_num * nd], range_doppler_data_buf[range_fft_num * nd];
+
+			  memcpy(&range_doppler_data, &currentBufp->at(currentDatap), sizeof(range_doppler_data));
+			  currentDatap += tlvLen;
 			  for(i=0; i< range_fft_num; i++){
 				  for (int j=0; j<nd; j++){
-					memcpy(&elem, &currentBufp->at(currentDatap), sizeof(uint16_t));
-					currentDatap += sizeof(uint16_t);
-					range_doppler_tensor.at<uint16_t>(j, i) = elem;
-					range_doppler_heatmap.at<cv::Vec3b>(j, i)[0] = uint8_t(120 * (elem - elem_min) / (elem_max - elem_min));
+					elem=range_doppler_data[i * nd + j];
+					if ((i == 0) && (j == 0))
+					{
+						elem_min = elem;
+						elem_max = elem;
+					}
+					else
+					{
+						if (elem_min > elem)
+						{
+							elem_min = elem;
+						}
+						if (elem_max < elem)
+						{
+							elem_max = elem;
+						}
+					}
+				  }
+			  }
+
+			  for (i = 0; i < range_fft_num; i++) //heatmap
+			  {
+				  for (int j = 0; j < nd; j++)
+				  {
+					  range_doppler_heatmap.data[3 * (i * nd + j)] = 120-(unsigned char)(120 * (range_doppler_data[i * nd + j] - elem_min) / float(elem_max - elem_min));
 				  }
 			  }
 
