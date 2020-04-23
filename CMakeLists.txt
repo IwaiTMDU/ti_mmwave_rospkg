@@ -15,7 +15,6 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   message_generation
   pluginlib
-  cv_bridge
 )
 
 find_package(Boost REQUIRED)
@@ -23,8 +22,6 @@ find_package(Boost REQUIRED)
 find_package(Threads REQUIRED)
 
 find_package(PCL 1.7.2 REQUIRED)
-
-find_package(OpenCV REQUIRED)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -63,6 +60,7 @@ find_package(OpenCV REQUIRED)
 add_message_files(
   FILES
   RadarScan.msg
+  RadarRaw.msg
 )
 
 ## Generate services in the 'srv' folder
@@ -154,7 +152,7 @@ add_library(mmwave
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
 ## either from message generation or dynamic reconfigure
-add_dependencies(mmwave ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS} ${OpenCV_LIBRARIES})
+add_dependencies(mmwave ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
@@ -213,13 +211,13 @@ add_dependencies(mmwave ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TA
 set (CMAKE_CXX_STANDARD 11)
 
 add_executable(${PROJECT_NAME} src/mmWaveLoader.cpp)
-target_link_libraries(mmwave ${serial_LIBRARIES} ${OpenCV_LIBRARIES} ${catkin_LIBRARIES})
-target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES} mmwave ${serial_LIBRARIES} ${OpenCV_LIBRARIES})
-add_dependencies(${PROJECT_NAME} ${catkin_EXPORTED_TARGETS} mmwave ${serial_EXPORTED_TARGETS} ${OpenCV_LIBRARIES})
+target_link_libraries(mmwave ${serial_LIBRARIES} ${catkin_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES} mmwave ${serial_LIBRARIES})
+add_dependencies(${PROJECT_NAME} ${catkin_EXPORTED_TARGETS} mmwave ${serial_EXPORTED_TARGETS})
 
 add_executable(mmWaveQuickConfig src/mmWaveQuickConfig.cpp)
-target_link_libraries(mmWaveQuickConfig ${catkin_LIBRARIES} mmwave ${OpenCV_LIBRARIES})
-add_dependencies(mmWaveQuickConfig ${catkin_EXPORTED_TARGETS} mmwave ${OpenCV_LIBRARIES})
+target_link_libraries(mmWaveQuickConfig ${catkin_LIBRARIES} mmwave)
+add_dependencies(mmWaveQuickConfig ${catkin_EXPORTED_TARGETS} mmwave)
 
 #############
 ## Testing ##

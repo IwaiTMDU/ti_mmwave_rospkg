@@ -62,7 +62,7 @@ public:
 private:
 
     int nr;
-    int nd;
+    int doppler_fft_num;
     int ntx;
     float fs;
     float fc;
@@ -138,7 +138,6 @@ private:
     ros::Publisher DataUARTHandler_pub;
     ros::Publisher radar_scan_pub;
 	ros::Publisher radar_raw_pub;
-	ros::Publisher range_doppeler_pub;
 	ros::Publisher marker_pub;
 };
 

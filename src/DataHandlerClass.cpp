@@ -1,15 +1,12 @@
 #include <DataHandlerClass.h>
-#include <cv_bridge/cv_bridge.h>
-#include <opencv2/highgui/highgui.hpp>
-#include <Eigen/Core>
-#include <unsupported/Eigen/FFT>
-#include <complex>
+#include "std_msgs/MultiArrayLayout.h"
+#include "std_msgs/MultiArrayDimension.h"
+#include "std_msgs/UInt16MultiArray.h"
 
 DataUARTHandler::DataUARTHandler(ros::NodeHandle* nh) : currentBufp(&pingPongBuffers[0]) , nextBufp(&pingPongBuffers[1]) {
     DataUARTHandler_pub = nh->advertise<sensor_msgs::PointCloud2>("/ti_mmwave/radar_scan_pcl", 100);
     radar_scan_pub = nh->advertise<ti_mmwave_rospkg::RadarScan>("/ti_mmwave/radar_scan", 100);
-    radar_raw_pub = nh->advertise<sensor_msgs::Image>("/ti_mmwave/range_azimuth", 100);
-	range_doppeler_pub = nh->advertise<sensor_msgs::Image>("/ti_mmwave/range_doppler", 100);
+	radar_raw_pub = nh->advertise<ti_mmwave_rospkg::RadarRaw>("/ti_mmwave/radar_raw", 100);
 	marker_pub = nh->advertise<visualization_msgs::Marker>("/ti_mmwave/radar_scan_markers", 100);
     maxAllowedElevationAngleDeg = 90; // Use max angle if none specified
     maxAllowedAzimuthAngleDeg = 90; // Use max angle if none specified
@@ -18,7 +15,7 @@ DataUARTHandler::DataUARTHandler(ros::NodeHandle* nh) : currentBufp(&pingPongBuf
     while(!nh->hasParam("/ti_mmwave/doppler_vel_resolution")){}
 
     nh->getParam("/ti_mmwave/numAdcSamples", nr);
-    nh->getParam("/ti_mmwave/numLoops", nd);
+    nh->getParam("/ti_mmwave/numLoops", doppler_fft_num);
     nh->getParam("/ti_mmwave/num_TX", ntx);
     nh->getParam("/ti_mmwave/f_s", fs);
     nh->getParam("/ti_mmwave/f_c", fc);
@@ -31,7 +28,7 @@ DataUARTHandler::DataUARTHandler(ros::NodeHandle* nh) : currentBufp(&pingPongBuf
     nh->getParam("/ti_mmwave/doppler_vel_resolution", vvel);
 
     ROS_INFO("\n\n==============================\nList of parameters\n==============================\nNumber of range samples: %d\nNumber of chirps: %d\nNumber of TX: %d\nf_s: %.3f MHz\nf_c: %.3f GHz\nBandwidth: %.3f MHz\nPRI: %.3f us\nFrame time: %.3f ms\nMax range: %.3f m\nRange resolution: %.3f m\nMax Doppler: +-%.3f m/s\nDoppler resolution: %.3f m/s\n==============================\n", \
-        nr, nd*2, ntx, fs/1e6, fc/1e9, BW/1e6, PRI*1e6, tfr*1e3, max_range, vrange, max_vel/2, vvel);
+        nr, doppler_fft_num*2, ntx, fs/1e6, fc/1e9, BW/1e6, PRI*1e6, tfr*1e3, max_range, vrange, max_vel/2, vvel);
 }
 
 void DataUARTHandler::setFrameID(char* myFrameID)
@@ -239,18 +236,18 @@ void *DataUARTHandler::sortIncomingData( void )
     unsigned int currentDatap = 0;
     SorterState sorterState = READ_HEADER;
     int i = 0, tlvCount = 0, offset = 0;
-    int j = 0;
+	int j = 0;
     float maxElevationAngleRatioSquared;
     float maxAzimuthAngleRatio;
 	int range_fft_num = 0;
     
     boost::shared_ptr<pcl::PointCloud<pcl::PointXYZI>> RScan(new pcl::PointCloud<pcl::PointXYZI>);
     ti_mmwave_rospkg::RadarScan radarscan;
-	ti_mmwave_rospkg::RadarRaw radarraw;
+	ti_mmwave_rospkg::RadarRaw radar_raw;
 
 	//wait for first packet to arrive
-    pthread_mutex_lock(&countSync_mutex);
-    pthread_cond_wait(&sort_go_cv, &countSync_mutex);
+	pthread_mutex_lock(&countSync_mutex);
+	pthread_cond_wait(&sort_go_cv, &countSync_mutex);
     pthread_mutex_unlock(&countSync_mutex);
 
 	pthread_mutex_lock(&currentBufp_mutex);
@@ -419,7 +416,7 @@ void *DataUARTHandler::sortIncomingData( void )
                     temp[5] = 10 * log10(mmwData.objOut.peakVal + 1);  // intensity
                     temp[6] = std::atan2(-temp[0], temp[1]) / M_PI * 180;
                     
-                    uint16_t tmp = (uint16_t)(temp[3] + nd / 2);
+                    uint16_t tmp = (uint16_t)(temp[3] + doppler_fft_num / 2);
 
                     // Map mmWave sensor coordinates to ROS coordinate system
                     RScan->points[i].x = temp[1];   // ROS standard coordinate system X-axis is forward which is the mmWave sensor Y-axis
@@ -560,77 +557,28 @@ void *DataUARTHandler::sortIncomingData( void )
             {
         
               i = 0;
-			  radarraw.header.frame_id = frameID;
-			  radarraw.header.stamp = ros::Time::now();
-			  int num_virtual_rx = 4*ntx;
-			  cv::Mat range_virtualAnntena = cv::Mat::zeros(range_fft_num, num_virtual_rx, CV_32FC2);
-			  int fft_rows = cvGetOptimalDFTSize(range_virtualAnntena.rows);
-			  int fft_cols = cvGetOptimalDFTSize(range_virtualAnntena.cols);
+			  int virtual_antenna_num = 4*ntx;
 
-			  unsigned short range_azimuth_tensor[fft_rows*fft_cols];
-			  cv::Mat range_azimuth_heatmap(cv::Size(fft_cols, fft_rows), CV_8UC3, cv::Scalar(0, 255, 255));
+			  std_msgs::UInt16MultiArray range_azimuth_data;
+			  uint16_t data[range_fft_num * virtual_antenna_num * 2];
+			  range_azimuth_data.data.clear();
+			  range_azimuth_data.layout.dim.resize(3, std_msgs::MultiArrayDimension());
+			  range_azimuth_data.layout.dim[0].label = "RangeFFTSize";
+			  range_azimuth_data.layout.dim[0].size = range_fft_num;
+			  range_azimuth_data.layout.dim[0].stride = range_fft_num * virtual_antenna_num * 2;
+			  range_azimuth_data.layout.dim[1].label = "VirtualAntennaSize";
+			  range_azimuth_data.layout.dim[1].size = virtual_antenna_num;
+			  range_azimuth_data.layout.dim[1].stride = virtual_antenna_num * 2;
+			  range_azimuth_data.layout.dim[2].label = "Complex";
+			  range_azimuth_data.layout.dim[2].size = 2;
+			  range_azimuth_data.layout.dim[2].stride = 2;
 
-			  cmplx16ImRe_t comp;
-			  std::vector<std::complex<float>> virtual_rx_data(num_virtual_rx);
-			  std::vector<std::complex<float>> fft_data(num_virtual_rx);
-			  Eigen::FFT<float> fft;
-			  for (i = 0; i < range_fft_num; i++)
-			  {
-				  for (int j = 0; j < num_virtual_rx; j++)
-				  {
-					  memcpy(&comp, &currentBufp->at(currentDatap), sizeof(comp));
-					  currentDatap += (sizeof(comp));
-
-					  if (comp.real > 32767){
-						  comp.real -= 65536;
-					  }
-					  if (comp.imag > 32767)
-					  {
-						  comp.imag -= 65536;
-					  }
-					  virtual_rx_data[j].real(float(comp.real));
-					  virtual_rx_data[j].imag(float(comp.imag));
-					  //currentDatap += (sizeof(mmwData.azimuthStatHmap));
-				  }
-
-				  fft.fwd(fft_data,virtual_rx_data);
-				  for(int j=0; j < num_virtual_rx; j++){
-					  range_azimuth_tensor[i * num_virtual_rx + j] = std::norm(virtual_rx_data[j]);
-				  }
-
+			  memcpy(data, &currentBufp->at(currentDatap), sizeof(data));
+			  currentDatap += tlvLen;
+			  for (int k = 0; k < range_fft_num * virtual_antenna_num * 2; k++){
+				  range_azimuth_data.data.push_back(data[k]);
 			  }
-
-			  float elem_min = 0, elem_max = 500, elems;
-			  for(i=0;i<range_fft_num; i++){
-				  for(int j=0; j<num_virtual_rx; j++){
-					  int index = i * num_virtual_rx + j;
-					  elems = range_azimuth_tensor[i * num_virtual_rx + j];
-					  if((i==0) && (j==0)){
-						  elem_min = elems;
-						  elem_max = elems;
-					  }else{
-						  if(elem_min > elems){
-							  elem_min = elems;
-						  }
-						  if(elem_max < elems){
-							  elem_max = elems;
-						  }
-					  }
-				  }
-			  }
-			  for(i=0;i<range_fft_num; i++){
-				  for (int j = 0; j < num_virtual_rx; j++)
-				  {
-					  range_azimuth_heatmap.data[3 * (i * num_virtual_rx + j)] = 120-uint8_t(120 * (range_azimuth_tensor[i * num_virtual_rx + j] - elem_min) / (elem_max - elem_min));
-				  }
-			  }
-			  //currentDatap += tlvLen;
-			  std_msgs::Header header;
-			  header.frame_id = frameID;
-			  header.stamp = ros::Time::now();
-			  cvtColor(range_azimuth_heatmap, range_azimuth_heatmap, CV_HSV2BGR);
-			  sensor_msgs::ImagePtr msg = cv_bridge::CvImage(header, "bgr8", range_azimuth_heatmap.t()).toImageMsg();
-			  radar_raw_pub.publish(msg);
+			  radar_raw.range_azimuth_data = range_azimuth_data;
 			  sorterState = CHECK_TLV_TYPE;
             }
             
@@ -638,56 +586,32 @@ void *DataUARTHandler::sortIncomingData( void )
             
         case READ_DOPPLER:
             {
-        
-              i = 0;
-			  uint16_t elem_min = 0, elem_max = 6000;
-			  uint16_t elem;
-			  cv::Mat range_doppler_heatmap(cv::Size(range_fft_num,nd), CV_8UC3, cv::Scalar(0, 255, 255));
-			  unsigned short range_doppler_data[range_fft_num * nd], range_doppler_data_buf[range_fft_num * nd];
+			  i = 0;
+			  std_msgs::UInt16MultiArray range_doppler_data;
+			  uint16_t data[range_fft_num * doppler_fft_num];
+			  range_doppler_data.data.clear();
+			  range_doppler_data.layout.dim.resize(2, std_msgs::MultiArrayDimension());
+			  range_doppler_data.layout.dim[0].label = "RangeFFTSize";
+			  range_doppler_data.layout.dim[0].size = range_fft_num;
+			  range_doppler_data.layout.dim[0].stride = range_fft_num * doppler_fft_num;
+			  range_doppler_data.layout.dim[1].label = "DopplerFFTSize";
+			  range_doppler_data.layout.dim[1].size = doppler_fft_num;
+			  range_doppler_data.layout.dim[1].stride = doppler_fft_num;
 
-			  memcpy(&range_doppler_data, &currentBufp->at(currentDatap), sizeof(range_doppler_data));
+			  memcpy(data, &currentBufp->at(currentDatap), sizeof(data));
 			  currentDatap += tlvLen;
-			  for(i=0; i< range_fft_num; i++){
-				  for (int j=0; j<nd; j++){
-					elem=range_doppler_data[i * nd + j];
-					if ((i == 0) && (j == 0))
-					{
-						elem_min = elem;
-						elem_max = elem;
-					}
-					else
-					{
-						if (elem_min > elem)
-						{
-							elem_min = elem;
-						}
-						if (elem_max < elem)
-						{
-							elem_max = elem;
-						}
-					}
-				  }
+			  for(int k=0; k < range_fft_num * doppler_fft_num; k++){
+			  	  range_doppler_data.data.push_back(data[k]);
 			  }
-
-			  for (i = 0; i < range_fft_num; i++) //heatmap
-			  {
-				  for (int j = 0; j < nd; j++)
-				  {
-					  range_doppler_heatmap.data[3 * (i * nd + j)] = 120-(unsigned char)(120 * (range_doppler_data[i * nd + j] - elem_min) / float(elem_max - elem_min));
-				  }
-			  }
-
-			  std_msgs::Header header;
-			  header.frame_id = frameID;
-			  header.stamp = ros::Time::now();
-			  cvtColor(range_doppler_heatmap, range_doppler_heatmap, CV_HSV2BGR);
-			  sensor_msgs::ImagePtr msg = cv_bridge::CvImage(header, "bgr8", range_doppler_heatmap).toImageMsg();
-
-			  range_doppeler_pub.publish(msg);
+			  radar_raw.range_doppler_data = range_doppler_data;
 			  sorterState = CHECK_TLV_TYPE;
 			}
-            
-            break;
+
+			radar_raw.header.frame_id = frameID;
+			radar_raw.header.stamp = ros::Time::now();
+			radar_raw_pub.publish(radar_raw);
+
+			break;
             
         case READ_STATS:
             {
