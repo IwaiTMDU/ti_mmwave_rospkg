@@ -137,7 +137,9 @@ private:
     
     ros::Publisher DataUARTHandler_pub;
     ros::Publisher radar_scan_pub;
-	ros::Publisher radar_raw_pub;
+	ros::Publisher range_profile_pub;
+	ros::Publisher range_azimuth_pub;
+	ros::Publisher range_doppler_pub;
 	ros::Publisher marker_pub;
 };
 
