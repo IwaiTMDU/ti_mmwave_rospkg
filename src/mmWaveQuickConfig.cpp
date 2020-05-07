@@ -26,6 +26,7 @@ int main(int argc, char **argv) {
     ros::Duration(0.5).sleep();
 
     myParams.open(argv[1]);
+	int retry_count = 0;
     
     if (myParams.is_open()) {
         while( std::getline(myParams, srv.request.comm)) {
@@ -41,7 +42,14 @@ int main(int argc, char **argv) {
             } else {
                 ROS_ERROR("mmWaveQuickConfig: Command failed (mmWave sensor did not respond with 'Done')");
                 ROS_ERROR("mmWaveQuickConfig: Response: '%s'", srv.response.resp.c_str() );
-                return 1;
+				if(retry_count < 5){
+					retry_count++;
+					ROS_INFO("Try again after 5 seconds. Trial count : %d/5", retry_count);
+					ros::Duration(5).sleep();
+				}else{
+					ROS_ERROR("Failed to send the config. Re-run");
+					return 1;
+				}
             }
             } else {
             ROS_ERROR("mmWaveQuickConfig: Failed to call service mmWaveCLI");
