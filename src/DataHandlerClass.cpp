@@ -357,8 +357,8 @@ void *DataUARTHandler::sortIncomingData( void )
             {
                 mmwData.numObjOut = mmwData.header.numDetectedObj;
             }
-            
-            // RScan->header.seq = 0;
+
+			// RScan->header.seq = 0;
             // RScan->header.stamp = (uint64_t)(ros::Time::now());
             // RScan->header.stamp = (uint32_t) mmwData.header.timeCpuCycles;
             RScan->header.frame_id = frameID;
