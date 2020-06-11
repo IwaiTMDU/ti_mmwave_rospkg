@@ -15,6 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   message_generation
   pluginlib
+  cv_bridge
 )
 
 find_package(Boost REQUIRED)
@@ -22,6 +23,8 @@ find_package(Boost REQUIRED)
 find_package(Threads REQUIRED)
 
 find_package(PCL 1.7.2 REQUIRED)
+
+find_package(OpenCV REQUIRED)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -218,6 +221,9 @@ add_dependencies(${PROJECT_NAME} ${catkin_EXPORTED_TARGETS} mmwave ${serial_EXPO
 add_executable(mmWaveQuickConfig src/mmWaveQuickConfig.cpp)
 target_link_libraries(mmWaveQuickConfig ${catkin_LIBRARIES} mmwave)
 add_dependencies(mmWaveQuickConfig ${catkin_EXPORTED_TARGETS} mmwave)
+
+add_executable(ti_data_processor src/ti_data_processor.cpp)
+target_link_libraries(ti_data_processor ${catkin_LIBRARIES} mmwave ${serial_LIBRARIES} ${OpenCV_LIBRARIES})
 
 #############
 ## Testing ##
