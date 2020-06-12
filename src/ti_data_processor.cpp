@@ -158,18 +158,35 @@ private:
 		}
 		theta[0] = -0.5*M_PI;
 		theta[azimuth_num+1] = 0.5*M_PI;
+		double sin_theta[azimuth_num+2], cos_theta[azimuth_num+2];
+		for(int i=0; i<azimuth_num+2; i++){
+			sin_theta[i] = sin(theta[i]);
+			cos_theta[i] = cos(theta[i]);
+		}
 		for (int i = 0; i < range_fft_num; i++)
 		{
-			for (int j = 0; j < theta.rows(); j++)
+			for (int j = 0; j < azimuth_num + 2; j++)
 			{
 				double range = range_resolution * i;
-				posxy.push_back(range * sin(theta[j]));
-				posxy.push_back(range * cos(theta[j]));
+				posxy.push_back(range * sin_theta[j]);
+				posxy.push_back(range * cos_theta[j]);
 			}
 		}
 		delaunator::Delaunator d_triangles(posxy);
 		int triangles_num = d_triangles.triangles.size() / 3;
 		ROS_INFO("Delaunay triangles num = %d\n", triangles_num);
+		std::vector<std::vector<std::array<Eigen::Vector3d, 3>>> theta_triangles(azimuth_num);
+		for(int i=0; i < triangles_num; i++){
+			int idx1 = 2 * d_triangles.triangles[3 * i];
+			int idx2 = 2 * d_triangles.triangles[3 * i + 1];
+			int idx3 = 2 * d_triangles.triangles[3 * i + 2];
+			Eigen::Vector3d tri1({d_triangles.coords[idx1], d_triangles.coords[idx1 + 1], 0});
+			Eigen::Vector3d tri2({d_triangles.coords[idx2], d_triangles.coords[idx2 + 1], 0});
+			Eigen::Vector3d tri3({d_triangles.coords[idx3], d_triangles.coords[idx3 + 1], 0});
+			Eigen::Vector3d center = (tri1 + tri2 + tri3) / 3.0;
+			int theta_index = int((center[0] / center.norm() * azimuth_num / 2.0)) + virtual_anntena_num / 2 - 1;
+			theta_triangles[theta_index].push_back(std::array<Eigen::Vector3d, 3>({tri1, tri2, tri3}));
+		}
 
 		for (int i = 0; i < heatmap_shape; i++)
 		{
@@ -180,15 +197,17 @@ private:
 				point[1] = heatmap_range * j / double(heatmap_shape);
 				points.push_back(point);
 				bool in_triangles;
-				for (int k = 0; k < triangles_num; k++)
+				int theta_index = int((sin(atan2(point[0], point[1])) * azimuth_num / 2.0)) + virtual_anntena_num / 2 - 1;
+				for (int k = 0; k < theta_triangles[theta_index].size(); k++)
 				{
-					Eigen::Vector3d tri1({d_triangles.coords[2 * d_triangles.triangles[3 * k]], d_triangles.coords[2 * d_triangles.triangles[3 * k] + 1], 0});
-					Eigen::Vector3d tri2({d_triangles.coords[2 * d_triangles.triangles[3 * k + 1]], d_triangles.coords[2 * d_triangles.triangles[3 * k + 1] + 1], 0});
-					Eigen::Vector3d tri3({d_triangles.coords[2 * d_triangles.triangles[3 * k + 2]], d_triangles.coords[2 * d_triangles.triangles[3 * k + 2] + 1], 0});
+					const std::array<Eigen::Vector3d, 3> &vector_array = theta_triangles[theta_index][k];
+					Eigen::Vector3d tri1 = vector_array[0];
+					Eigen::Vector3d tri2 = vector_array[1];
+					Eigen::Vector3d tri3 = vector_array[2];
 					in_triangles = PointInTriangle(point, tri1, tri2, tri3);
 					if (in_triangles)
 					{
-						triangles.push_back(std::array<Eigen::Vector3d, 3>({tri1, tri2, tri3}));
+						triangles.push_back(vector_array);
 						break;
 					}
 				}
