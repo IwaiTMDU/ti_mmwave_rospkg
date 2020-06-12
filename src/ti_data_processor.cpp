@@ -74,8 +74,9 @@ public:
 
 		for(int i=0; i < heatmap_shape; i++){
 			for(int j=0; j < heatmap_shape; j++){
-				Eigen::Vector3d point = points[i * heatmap_shape+j];
-				std::array<Eigen::Vector3d, 3> tri_vertex = triangles[i * heatmap_shape + j];
+				int idx = i *heatmap_shape + j;
+				const Eigen::Vector3d &point = points[idx];
+				const std::array<Eigen::Vector3d, 3> &tri_vertex = triangles[idx];
 				Eigen::Vector3d tri1 = tri_vertex[0];
 				Eigen::Vector3d tri2 = tri_vertex[1];
 				Eigen::Vector3d tri3 = tri_vertex[2];
@@ -86,10 +87,8 @@ public:
 				Eigen::Vector3d vec1 = tri2 - tri1;
 				Eigen::Vector3d vec2 = tri3 - tri1;
 				Eigen::Vector3d n = (vec1.cross(vec2)).normalized();
-				double d = -tri1.dot(n);
-				float elem = - (n[0] * point[0] + n[1] * point[1] + d) / n[2];
-				
-				cartesian_data.at<uint16_t>(heatmap_shape - 1 - j, i) = uint16_t(elem);
+
+				cartesian_data.ptr<uint16_t>(heatmap_shape - 1 - j)[i] = uint16_t(-(n.dot(point) - tri1.dot(n)) / n[2]);
 			}
 		}
 
@@ -105,23 +104,19 @@ public:
 		std_msgs::MultiArrayLayout layout = radar_raw.data.layout;
 		int doppler_fft_num = layout.dim[1].size;
 		int doppler_num = doppler_fft_num - 1;
-		cv::Mat range_doppler_data(cv::Size(range_fft_num, doppler_num), CV_16UC1, cv::Scalar(0));
+		cv::Mat range_doppler_data(cv::Size(doppler_num,range_fft_num), CV_16UC1, cv::Scalar(0));
 		cv::Mat range_doppler_heatmap;
 		const int cp_size = doppler_fft_num / 2;
 		const int cp_bite_size = cp_size * sizeof(uint16_t);
 
 		for (int i = 0; i < range_fft_num; i++)
 		{
-			uint16_t buf[doppler_num];
-			std::memcpy(buf, &radar_raw.data.data[i*doppler_fft_num + cp_size + 1], cp_bite_size - sizeof(uint16_t));
-			std::memcpy(&buf[cp_size-1], &radar_raw.data.data[i*doppler_fft_num], cp_bite_size);
-			
-			for (int j = 0; j < doppler_num; j++)
-			{
-				range_doppler_data.at<uint16_t>(j,i)= buf[j];
-			}
+			// concat & slice(1)
+			std::memcpy(range_doppler_data.ptr<uint16_t>(i), &radar_raw.data.data[i * doppler_fft_num + cp_size + 1], cp_bite_size - sizeof(uint16_t));
+			std::memcpy(&range_doppler_data.ptr<uint16_t>(i)[cp_size-1], &radar_raw.data.data[i * doppler_fft_num], cp_bite_size);
 		}
-		
+		cv::transpose(range_doppler_data, range_doppler_data);
+
 		HeatmapMaker(range_doppler_data, range_doppler_heatmap);
 		cv::Mat resized_heatmap;
 		cv::resize(range_doppler_heatmap, resized_heatmap, cv::Size(0,0), 1, 1, cv::INTER_NEAREST);
@@ -201,10 +196,7 @@ private:
 				for (int k = 0; k < theta_triangles[theta_index].size(); k++)
 				{
 					const std::array<Eigen::Vector3d, 3> &vector_array = theta_triangles[theta_index][k];
-					Eigen::Vector3d tri1 = vector_array[0];
-					Eigen::Vector3d tri2 = vector_array[1];
-					Eigen::Vector3d tri3 = vector_array[2];
-					in_triangles = PointInTriangle(point, tri1, tri2, tri3);
+					in_triangles = PointInTriangle(point, vector_array[0], vector_array[1], vector_array[2]);
 					if (in_triangles)
 					{
 						triangles.push_back(vector_array);
@@ -229,7 +221,7 @@ private:
 		{
 			for (int j = 0; j < input.cols; j++)
 			{
-				output.at<cv::Vec3b>(i,j)[0] = uint8_t(120.0 / (min_elem - max_elem) * (input.at<uint16_t>(i,j) - max_elem));
+				output.ptr<cv::Vec3b>(i)[j][0] = uint8_t(120.0 / (min_elem - max_elem) * (input.ptr<uint16_t>(i)[j] - max_elem));
 			}
 		}
 		cvtColor(output, output, CV_HSV2BGR);
@@ -240,13 +232,16 @@ private:
 		double maxx = std::max(tri3[0], std::max(tri1[0], tri2[0]));
 		double miny = std::min(tri3[1], std::min(tri1[1], tri2[1]));
 		double maxy = std::max(tri3[1], std::max(tri1[1], tri2[1]));
+		
 		if ((pt[0] >= minx) && (pt[0] <= maxx) && (pt[1] >= miny) && (pt[1] <= maxy))
 		{
 			bool b1 = Crosssign(pt, tri1, tri2);
 			bool b2 = Crosssign(pt, tri2, tri3);
+			if(b1 != b2){
+				return false;
+			}
 			bool b3 = Crosssign(pt, tri3, tri1);
-
-			if((b1 == b2) && (b2 == b3)){
+			if(b2 == b3){
 				return true;
 			}else{
 				return false;
